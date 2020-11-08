@@ -1,0 +1,226 @@
+import numpy
+import pandas
+import scipy
+import sympy 
+
+import statsmodels.api as stats
+
+def SWEEPOperator (pDim, inputM, tol):
+    aliasParam = []
+    nonAliasParam = []
+    A = numpy.array(inputM, copy = True, dtype = numpy.float)
+    diagA = numpy.diagonal(A)
+ 
+    for k in range(pDim):
+        akk = A[k,k]
+        if (akk >= (tol * diagA[k])):
+            nonAliasParam.append(k)
+            for i in range(pDim):
+                if (i != k):
+                    for j in range(pDim):
+                        if (j != k):
+                            A[i,j] = A[i,j] - A[i,k] * (A[k,j] / akk)
+                            A[j,i] = A[i,j]
+                A[i,k] = A[i,k] / akk
+                A[k,i] = A[i,k]
+            A[k,k] = - 1.0 / akk
+        else:
+            aliasParam.append(k)
+            for i in range(pDim):
+                A[i,k] = 0.0
+                A[k,i] = 0.0
+    return (A, aliasParam, nonAliasParam)
+
+
+
+
+# A function that returns the columnwise product of two dataframes (must have same number of rows)
+def create_interaction (inDF1, inDF2):
+    name1 = inDF1.columns
+    name2 = inDF2.columns
+    outDF = pandas.DataFrame()
+    for col1 in name1:
+        for col2 in name2:
+            outName = col1 + " * " + col2
+            outDF[outName] = inDF1[col1] * inDF2[col2]
+    return(outDF)
+
+# A function that find the non-aliased columns, fit a logistic model, and return the full parameter estimates
+def build_mnlogit (fullX, y, debug = 'N'):
+    # Number of all parameters
+    nFullParam = fullX.shape[1]
+    XtX = numpy.transpose(fullX).dot(fullX)
+    invXtX, aliasParam, nonAliasParam = SWEEPOperator(pDim = nFullParam,inputM = XtX, tol = 1e-8)
+
+    # Number of target categories
+    y_category = y.cat.categories
+    nYCat = len(y_category)
+
+    # Find the non-redundant columns in the design matrix fullX
+    #reduced_form, inds = sympy.Matrix(fullX.values).rref()
+
+    # These are the column numbers of the non-redundant columns
+    if (debug == 'Y'):
+        print('Column Numbers of the Non-redundant Columns:')
+        print(nonAliasParam)
+
+    # Extract only the non-redundant columns for modeling
+    X = fullX.iloc[:, list(nonAliasParam)]
+
+    # The number of free parameters
+    thisDF = len(nonAliasParam) * (nYCat - 1)
+
+    # Build a multionomial logistic model
+    logit = stats.MNLogit(y, X)
+    thisFit = logit.fit(method='newton', full_output = True, maxiter = 100, tol = 1e-8)
+    thisParameter = thisFit.params
+    thisLLK = logit.loglike(thisParameter.values)
+
+    if (debug == 'Y'):
+        print(thisFit.summary())
+        print("Model Parameter Estimates:\n", thisParameter)
+        print("Model Log-Likelihood Value =", thisLLK)
+        print("Number of Free Parameters =", thisDF)
+
+    # Recreat the estimates of the full parameters
+    workParams = pandas.DataFrame(numpy.zeros(shape = (nFullParam, (nYCat - 1))))
+    workParams = workParams.set_index(keys = fullX.columns)
+    fullParams = pandas.merge(workParams, thisParameter, how = "left", left_index = True, right_index = True)
+    fullParams = fullParams.drop(columns = '0_x').fillna(0.0)
+
+    # Return model statistics
+    return (thisLLK, thisDF, fullParams)
+
+hmeq = pandas.read_csv('Purchase_Likelihood.csv', delimiter=',',
+                                      usecols=['group_size', 'homeowner', 'married_couple','insurance'])
+
+hmeq = hmeq.dropna()
+
+# Specify Origin as a categorical variable
+y = hmeq['insurance'].astype('category')
+
+# Specify JOB and REASON as categorical variables
+x_gs = pandas.get_dummies(hmeq[['group_size']].astype('category'))
+x_ho = pandas.get_dummies(hmeq[['homeowner']].astype('category'))
+x_mc = pandas.get_dummies(hmeq[['married_couple']].astype('category'))
+
+
+# Intercept only model
+designX = pandas.DataFrame(y.where(y.isnull(), 1))
+llk0, df0, fullParams0 = build_mnlogit (designX, y, debug = 'Y')
+
+# Intercept + group_size
+design_x = stats.add_constant(x_gs, prepend=True)
+llk1_gs, df1_gs, full_params1_gs = build_mnlogit (design_x, y, debug = 'Y')
+test_dev = 2 * (llk1_gs - llk0)
+test_df = df1_gs - df0
+test_p_value_gs = scipy.stats.chi2.sf(test_dev, test_df)
+print('Deviance Chi=Square Test')
+print('Chi-Square Statistic = ', test_dev)
+print('  Degrees of Freedom = ', test_df)
+print('        Significance = ', test_p_value_gs)
+
+
+# Intercept + group_size + homeowner
+design_x = x_gs
+design_x = design_x.join(x_ho)
+design_x = stats.add_constant(design_x, prepend=True)
+llk2_gs_ho, df2_gs_ho, full_params2_gs_ho = build_mnlogit (design_x, y, debug = 'Y')
+test_dev = 2 * (llk2_gs_ho - llk1_gs)
+test_df = df2_gs_ho - df1_gs
+test_p_value_gs_ho = scipy.stats.chi2.sf(test_dev, test_df)
+print('Deviance Chi=Square Test')
+print('Chi-Square Statistic = ', test_dev)
+print('  Degrees of Freedom = ', test_df)
+print('        Significance = ', test_p_value_gs_ho)
+
+
+# Intercept + group_size + homeowner + married_couple
+design_x = x_gs
+design_x = design_x.join(x_ho)
+design_x = design_x.join(x_mc)
+design_x = stats.add_constant(design_x, prepend=True)
+llk3_gs_ho_mc, df3_gs_ho_mc, full_params3_gs_ho_mc = build_mnlogit (design_x, y, debug = 'Y')
+test_dev = 2 * (llk3_gs_ho_mc - llk2_gs_ho)
+test_df = df3_gs_ho_mc - df2_gs_ho
+test_p_value_gs_ho_mc = scipy.stats.chi2.sf(test_dev, test_df)
+print('Deviance Chi=Square Test')
+print('Chi-Square Statistic = ', test_dev)
+print('  Degrees of Freedom = ', test_df)
+print('        Significance = ', test_p_value_gs_ho_mc)
+
+
+
+
+# Intercept + group_size + homeowner + married_couple + group_size * homeowner
+design_x = x_gs
+design_x = design_x.join(x_ho)
+design_x = design_x.join(x_mc)
+# Create the columns for the group_size * homeowner interaction effect
+x_gsho = create_interaction(x_gs, x_ho)
+design_x = design_x.join(x_gsho)
+design_x = stats.add_constant(design_x, prepend=True)
+llk4_gs_ho_mc_gsho, df4_gs_ho_mc_gsho, full_params4_gs_ho_mc_gsho = build_mnlogit(design_x, y, debug='Y')
+test_dev = 2 * (llk4_gs_ho_mc_gsho - llk3_gs_ho_mc)
+test_df = df4_gs_ho_mc_gsho - df3_gs_ho_mc
+test_p_value_gs_ho_mc_gsho = scipy.stats.chi2.sf(test_dev, test_df)
+print('Deviance Chi=Square Test')
+print('Chi-Square Statistic = ', test_dev)
+print('  Degrees of Freedom = ', test_df)
+print('        Significance = ', test_p_value_gs_ho_mc_gsho)
+
+
+
+
+
+# Intercept + group_size + homeowner + married_couple + group_size * homeowner +	group_size * married_couple
+design_x = x_gs
+design_x = design_x.join(x_ho)
+design_x = design_x.join(x_mc)
+# Create the columns for the group_size * homeowner interaction effect
+x_gsho = create_interaction(x_gs, x_ho)
+design_x = design_x.join(x_gsho)
+
+#group_size * married_couple
+x_gmc = create_interaction(x_gs, x_mc)
+design_x = design_x.join(x_gmc)
+design_x = stats.add_constant(design_x, prepend=True)
+llk5_gs_ho_mc_gsho_homc, df5_gs_ho_mc_gsho_homc, full_params5_gs_ho_mc_gsho_homc = build_mnlogit(design_x, y, debug='Y')
+test_dev = 2 * (llk5_gs_ho_mc_gsho_homc - llk4_gs_ho_mc_gsho)
+test_df = df5_gs_ho_mc_gsho_homc - df4_gs_ho_mc_gsho
+test_p_value_gs_ho_mc_gsho_homc = scipy.stats.chi2.sf(test_dev, test_df)
+print('Deviance Chi=Square Test')
+print('Chi-Square Statistic = ', test_dev)
+print('  Degrees of Freedom = ', test_df)
+print('        Significance = ', test_p_value_gs_ho_mc_gsho_homc)
+
+
+# Intercept + group_size + homeowner + married_couple + group_size * homeowner +	group_size * married_couple +	homeowner * married_couple 
+design_x = x_gs
+design_x = design_x.join(x_ho)
+design_x = design_x.join(x_mc)
+# Create the columns for the group_size * homeowner interaction effect
+x_gsho = create_interaction(x_gs, x_ho)
+design_x = design_x.join(x_gsho)
+
+#group_size * married_couple
+x_gmc = create_interaction(x_gs, x_mc)
+design_x = design_x.join(x_gmc)
+#homeowner and married couple
+
+x_homc = create_interaction(x_ho, x_mc)
+design_x = design_x.join(x_homc)
+
+design_x = stats.add_constant(design_x, prepend=True)
+
+llk6_gs_ho_mc_gsho_homc, df6_gs_ho_mc_gsho_homc, full_params6_gs_ho_mc_gsho_homc = build_mnlogit(design_x, y, debug='Y')
+test_dev = 2 * (llk6_gs_ho_mc_gsho_homc - llk5_gs_ho_mc_gsho_homc)
+test_df = df6_gs_ho_mc_gsho_homc - df5_gs_ho_mc_gsho_homc
+test_p_value_gs_ho_mc_gsho_homc = scipy.stats.chi2.sf(test_dev, test_df)
+print('Deviance Chi=Square Test')
+print('Chi-Square Statistic = ', test_dev)
+print('  Degrees of Freedom = ', test_df)
+print('        Significance = ', test_p_value_gs_ho_mc_gsho_homc)
+
+
+print(f'Degree of Freedom = {df6_gs_ho_mc_gsho_homc}')
